@@ -21,11 +21,23 @@
         .negative-amount {
             color: #dc3545;
         }
+        .edit-form {
+            display: none;
+        }
+        .edit-mode .view-mode {
+            display: none;
+        }
+        .edit-mode .edit-form {
+            display: block;
+        }
     </style>
 </head>
 <body>
     <div class="container mt-5">
-        <h1 class="mb-4">Transaction Balance App</h1>
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h1>Transaction Balance App</h1>
+            <a href="/deposit-config" class="btn btn-outline-primary">Configure Deposits</a>
+        </div>
         
         <div class="transaction-form">
             <h3>Add New Transaction</h3>
@@ -58,18 +70,58 @@
                         <th>Description</th>
                         <th class="text-end">Amount</th>
                         <th class="text-end">Running Balance</th>
+                        <th>Actions</th>
                     </tr>
                 </thead>
                 <tbody>
                     <% transactions.forEach(transaction => { %>
-                        <tr>
-                            <td><%= transaction.date.toLocaleDateString() %></td>
-                            <td><%= transaction.description %></td>
-                            <td class="text-end <%= transaction.amount >= 0 ? 'positive-amount' : 'negative-amount' %>">
-                                <%= transaction.amount %>
+                        <tr data-id="<%= transaction.id %>">
+                            <td>
+                                <div class="view-mode">
+                                    <%= transaction.date.toLocaleDateString() %>
+                                </div>
+                                <div class="edit-form">
+                                    <input type="date" class="form-control form-control-sm" 
+                                           name="date" value="<%= transaction.date.toISOString().split('T')[0] %>" required>
+                                </div>
+                            </td>
+                            <td>
+                                <div class="view-mode">
+                                    <%= transaction.description %>
+                                </div>
+                                <div class="edit-form">
+                                    <input type="text" class="form-control form-control-sm" 
+                                           name="description" value="<%= transaction.description %>" required>
+                                </div>
+                            </td>
+                            <td class="text-end">
+                                <div class="view-mode <%= transaction.amount >= 0 ? 'positive-amount' : 'negative-amount' %>">
+                                    <%= transaction.amount %>
+                                </div>
+                                <div class="edit-form">
+                                    <input type="number" step="0.01" class="form-control form-control-sm text-end" 
+                                           name="amount" value="<%= transaction.amount %>" required>
+                                </div>
                             </td>
                             <td class="text-end <%= transaction.running_balance >= 0 ? 'positive-amount' : 'negative-amount' %>">
                                 <%= transaction.running_balance %>
+                            </td>
+                            <td>
+                                <div class="view-mode">
+                                    <button class="btn btn-sm btn-outline-primary edit-btn">Edit</button>
+                                    <form action="/transaction/<%= transaction.id %>/delete" method="POST" class="d-inline">
+                                        <button type="submit" class="btn btn-sm btn-outline-danger" 
+                                                onclick="return confirm('Are you sure you want to delete this transaction?')">
+                                            Delete
+                                        </button>
+                                    </form>
+                                </div>
+                                <div class="edit-form">
+                                    <form action="/transaction/<%= transaction.id %>/update" method="POST" class="d-inline">
+                                        <button type="submit" class="btn btn-sm btn-success">Save</button>
+                                        <button type="button" class="btn btn-sm btn-secondary cancel-btn">Cancel</button>
+                                    </form>
+                                </div>
                             </td>
                         </tr>
                     <% }); %>
@@ -79,5 +131,24 @@
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            // Edit button click handler
+            document.querySelectorAll('.edit-btn').forEach(button => {
+                button.addEventListener('click', function() {
+                    const row = this.closest('tr');
+                    row.classList.add('edit-mode');
+                });
+            });
+
+            // Cancel button click handler
+            document.querySelectorAll('.cancel-btn').forEach(button => {
+                button.addEventListener('click', function() {
+                    const row = this.closest('tr');
+                    row.classList.remove('edit-mode');
+                });
+            });
+        });
+    </script>
 </body>
 </html> 
