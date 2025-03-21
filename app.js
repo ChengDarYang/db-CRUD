@@ -46,11 +46,23 @@ app.get('/', async (req, res) => {
 // Deposit configuration routes
 app.get('/deposit-config', async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM deposit_settings ORDER BY id DESC LIMIT 1');
-    res.render('deposit-config', { settings: result.rows[0] });
-  } catch (err) {
-    console.error(err);
-    res.status(500).send('Server Error');
+    const settingsResult = await pool.query('SELECT * FROM deposit_settings ORDER BY id DESC LIMIT 1');
+    const depositSettings = settingsResult.rows[0];
+
+    // Get the most recent auto deposit
+    const lastDepositResult = await pool.query(
+      'SELECT date FROM transactions WHERE description = $1 ORDER BY date DESC LIMIT 1',
+      ['Auto Deposit']
+    );
+    const lastDeposit = lastDepositResult.rows[0];
+
+    res.render('deposit-config', { 
+      depositSettings,
+      lastDeposit
+    });
+  } catch (error) {
+    console.error('Error fetching deposit settings:', error);
+    res.status(500).send('Error fetching deposit settings: ' + error.message);
   }
 });
 
@@ -70,50 +82,136 @@ app.post('/deposit-config', async (req, res) => {
 
 app.post('/update-deposits', async (req, res) => {
   try {
-    // Get the latest deposit settings
-    const settingsResult = await pool.query('SELECT * FROM deposit_settings ORDER BY id DESC LIMIT 1');
+    const client = await pool.connect();
+    await client.query('BEGIN');
+
+    // Get deposit settings
+    const settingsResult = await client.query('SELECT * FROM deposit_settings ORDER BY id DESC LIMIT 1');
     if (settingsResult.rows.length === 0) {
-      return res.redirect('/deposit-config');
+      throw new Error('No deposit settings found');
+    }
+    const settings = settingsResult.rows[0];
+
+    // Get the most recent auto deposit
+    const lastDepositResult = await client.query(
+      'SELECT date FROM transactions WHERE description = $1 ORDER BY date DESC LIMIT 1',
+      ['Auto Deposit']
+    );
+
+    let startDate;
+    if (lastDepositResult.rows.length > 0) {
+      // Start from the day after the last auto deposit
+      startDate = new Date(lastDepositResult.rows[0].date);
+      startDate.setDate(startDate.getDate() + 1);
+    } else {
+      // If no auto deposits exist, start from the configured start date
+      startDate = new Date(settings.start_date);
     }
 
-    const settings = settingsResult.rows[0];
-    const startDate = new Date(settings.start_date);
     const today = new Date();
+    today.setHours(0, 0, 0, 0);
 
-    // Get existing deposit transactions
-    const existingDeposits = await pool.query(
-      'SELECT date FROM transactions WHERE description LIKE $1',
-      ['%Auto Deposit%']
-    );
-    const existingDates = existingDeposits.rows.map(row => row.date.toISOString().split('T')[0]);
-
-    // Generate new deposit transactions
+    // Generate deposits from start date to today
     let currentDate = new Date(startDate);
     while (currentDate <= today) {
-      const dateStr = currentDate.toISOString().split('T')[0];
-      if (!existingDates.includes(dateStr)) {
-        await pool.query(
+      // Check if a deposit already exists for this date
+      const existingDepositResult = await client.query(
+        'SELECT id FROM transactions WHERE date = $1 AND description = $2',
+        [currentDate.toISOString().split('T')[0], 'Auto Deposit']
+      );
+
+      if (existingDepositResult.rows.length === 0) {
+        // Insert new deposit
+        await client.query(
           'INSERT INTO transactions (date, description, amount) VALUES ($1, $2, $3)',
-          [dateStr, `Auto Deposit - ${settings.interval_days} day interval`, settings.amount]
+          [currentDate.toISOString().split('T')[0], 'Auto Deposit', settings.amount]
         );
       }
+
+      // Move to next deposit date
       currentDate.setDate(currentDate.getDate() + settings.interval_days);
     }
 
-    res.redirect('/');
-  } catch (err) {
-    console.error(err);
-    res.status(500).send('Server Error');
+    // Recalculate running balances
+    await client.query(`
+      WITH RECURSIVE running_balance AS (
+        SELECT 
+          id,
+          date,
+          description,
+          amount,
+          CAST(amount AS numeric(10,2)) as running_balance
+        FROM transactions
+        WHERE id = (SELECT MIN(id) FROM transactions)
+        
+        UNION ALL
+        
+        SELECT 
+          t.id,
+          t.date,
+          t.description,
+          t.amount,
+          CAST(t.amount + rb.running_balance AS numeric(10,2))
+        FROM transactions t
+        JOIN running_balance rb ON t.id = rb.id + 1
+      )
+      UPDATE transactions t
+      SET running_balance = rb.running_balance
+      FROM running_balance rb
+      WHERE t.id = rb.id
+    `);
+
+    await client.query('COMMIT');
+    client.release();
+
+    res.redirect('/deposit-config');
+  } catch (error) {
+    console.error('Error updating deposits:', error);
+    res.status(500).send('Error updating deposits: ' + error.message);
   }
 });
 
 app.post('/transaction', async (req, res) => {
-  const { date, description, amount } = req.body;
+  const { date, description, amount, type } = req.body;
   try {
+    // Convert amount to number and make it negative if it's an expense
+    const numericAmount = parseFloat(amount);
+    const finalAmount = type === 'expense' ? -numericAmount : numericAmount;
+
     await pool.query(
       'INSERT INTO transactions (date, description, amount) VALUES ($1, $2, $3)',
-      [date, description, parseFloat(amount)]
+      [date, description, finalAmount]
     );
+
+    // Recalculate running balances
+    await pool.query(`
+      WITH RECURSIVE running_balance AS (
+        SELECT 
+          id,
+          date,
+          description,
+          amount,
+          CAST(amount AS numeric(10,2)) as running_balance
+        FROM transactions
+        WHERE id = (SELECT MIN(id) FROM transactions)
+        
+        UNION ALL
+        
+        SELECT 
+          t.id,
+          t.date,
+          t.description,
+          t.amount,
+          CAST(t.amount + rb.running_balance AS numeric(10,2))
+        FROM transactions t
+        JOIN running_balance rb ON t.id = rb.id + 1
+      )
+      UPDATE transactions t
+      SET running_balance = rb.running_balance
+      FROM running_balance rb
+      WHERE t.id = rb.id
+    `);
+
     res.redirect('/');
   } catch (err) {
     console.error(err);
@@ -168,6 +266,7 @@ const initDb = async () => {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
+
     console.log('Database initialized successfully');
   } catch (err) {
     console.error('Error initializing database:', err);
