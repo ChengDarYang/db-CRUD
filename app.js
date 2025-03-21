@@ -26,7 +26,73 @@ app.set('views', path.join(__dirname, 'views'));
 // Routes
 app.get('/', async (req, res) => {
   try {
-    const result = await pool.query(`
+    const client = await pool.connect();
+    await client.query('BEGIN');
+
+    // Get deposit settings
+    const settingsResult = await client.query('SELECT * FROM deposit_settings ORDER BY id DESC LIMIT 1');
+    if (settingsResult.rows.length > 0) {
+      const settings = settingsResult.rows[0];
+
+      // Get the most recent auto deposit
+      const lastDepositResult = await client.query(
+        'SELECT date FROM transactions WHERE description = $1 ORDER BY date DESC LIMIT 1',
+        ['Auto Deposit']
+      );
+
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+
+      // If no deposits exist, start from configured start date
+      if (lastDepositResult.rows.length === 0) {
+        let startDate = new Date(settings.start_date);
+        let currentDate = new Date(startDate);
+        
+        while (currentDate <= today) {
+          const existingDepositResult = await client.query(
+            'SELECT id FROM transactions WHERE date = $1 AND description = $2',
+            [currentDate.toISOString().split('T')[0], 'Auto Deposit']
+          );
+
+          if (existingDepositResult.rows.length === 0) {
+            await client.query(
+              'INSERT INTO transactions (date, description, amount) VALUES ($1, $2, $3)',
+              [currentDate.toISOString().split('T')[0], 'Auto Deposit', settings.amount]
+            );
+          }
+          currentDate.setDate(currentDate.getDate() + settings.interval_days);
+        }
+      } else {
+        // Check if we're past the interval period
+        const lastDepositDate = new Date(lastDepositResult.rows[0].date);
+        const daysSinceLastDeposit = Math.floor((today - lastDepositDate) / (1000 * 60 * 60 * 24));
+        
+        if (daysSinceLastDeposit >= settings.interval_days - 1) {
+          // Start from the day after the last auto deposit
+          let startDate = new Date(lastDepositDate);
+          startDate.setDate(startDate.getDate() + 1);
+          let currentDate = new Date(startDate);
+
+          while (currentDate <= today) {
+            const existingDepositResult = await client.query(
+              'SELECT id FROM transactions WHERE date = $1 AND description = $2',
+              [currentDate.toISOString().split('T')[0], 'Auto Deposit']
+            );
+
+            if (existingDepositResult.rows.length === 0) {
+              await client.query(
+                'INSERT INTO transactions (date, description, amount) VALUES ($1, $2, $3)',
+                [currentDate.toISOString().split('T')[0], 'Auto Deposit', settings.amount]
+              );
+            }
+            currentDate.setDate(currentDate.getDate() + settings.interval_days);
+          }
+        }
+      }
+    }
+
+    // Get all transactions with running balance
+    const result = await client.query(`
       SELECT 
         id,
         date,
@@ -36,6 +102,10 @@ app.get('/', async (req, res) => {
       FROM transactions
       ORDER BY date DESC, id DESC
     `);
+
+    await client.query('COMMIT');
+    client.release();
+
     res.render('index', { transactions: result.rows });
   } catch (err) {
     console.error(err);
@@ -98,68 +168,55 @@ app.post('/update-deposits', async (req, res) => {
       ['Auto Deposit']
     );
 
-    let startDate;
-    if (lastDepositResult.rows.length > 0) {
-      // Start from the day after the last auto deposit
-      startDate = new Date(lastDepositResult.rows[0].date);
-      startDate.setDate(startDate.getDate() + 1);
-    } else {
-      // If no auto deposits exist, start from the configured start date
-      startDate = new Date(settings.start_date);
-    }
-
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
-    // Generate deposits from start date to today
-    let currentDate = new Date(startDate);
-    while (currentDate <= today) {
-      // Check if a deposit already exists for this date
-      const existingDepositResult = await client.query(
-        'SELECT id FROM transactions WHERE date = $1 AND description = $2',
-        [currentDate.toISOString().split('T')[0], 'Auto Deposit']
-      );
-
-      if (existingDepositResult.rows.length === 0) {
-        // Insert new deposit
-        await client.query(
-          'INSERT INTO transactions (date, description, amount) VALUES ($1, $2, $3)',
-          [currentDate.toISOString().split('T')[0], 'Auto Deposit', settings.amount]
+    // If no deposits exist, start from configured start date
+    if (lastDepositResult.rows.length === 0) {
+      let startDate = new Date(settings.start_date);
+      let currentDate = new Date(startDate);
+      
+      while (currentDate <= today) {
+        const existingDepositResult = await client.query(
+          'SELECT id FROM transactions WHERE date = $1 AND description = $2',
+          [currentDate.toISOString().split('T')[0], 'Auto Deposit']
         );
+
+        if (existingDepositResult.rows.length === 0) {
+          await client.query(
+            'INSERT INTO transactions (date, description, amount) VALUES ($1, $2, $3)',
+            [currentDate.toISOString().split('T')[0], 'Auto Deposit', settings.amount]
+          );
+        }
+        currentDate.setDate(currentDate.getDate() + settings.interval_days);
       }
+    } else {
+      // Check if we're past the interval period
+      const lastDepositDate = new Date(lastDepositResult.rows[0].date);
+      const daysSinceLastDeposit = Math.floor((today - lastDepositDate) / (1000 * 60 * 60 * 24));
+      
+      if (daysSinceLastDeposit >= settings.interval_days - 1) {
+        // Start from the day after the last auto deposit
+        let startDate = new Date(lastDepositDate);
+        startDate.setDate(startDate.getDate() + 1);
+        let currentDate = new Date(startDate);
 
-      // Move to next deposit date
-      currentDate.setDate(currentDate.getDate() + settings.interval_days);
+        while (currentDate <= today) {
+          const existingDepositResult = await client.query(
+            'SELECT id FROM transactions WHERE date = $1 AND description = $2',
+            [currentDate.toISOString().split('T')[0], 'Auto Deposit']
+          );
+
+          if (existingDepositResult.rows.length === 0) {
+            await client.query(
+              'INSERT INTO transactions (date, description, amount) VALUES ($1, $2, $3)',
+              [currentDate.toISOString().split('T')[0], 'Auto Deposit', settings.amount]
+            );
+          }
+          currentDate.setDate(currentDate.getDate() + settings.interval_days);
+        }
+      }
     }
-
-    // Recalculate running balances
-    await client.query(`
-      WITH RECURSIVE running_balance AS (
-        SELECT 
-          id,
-          date,
-          description,
-          amount,
-          CAST(amount AS numeric(10,2)) as running_balance
-        FROM transactions
-        WHERE id = (SELECT MIN(id) FROM transactions)
-        
-        UNION ALL
-        
-        SELECT 
-          t.id,
-          t.date,
-          t.description,
-          t.amount,
-          CAST(t.amount + rb.running_balance AS numeric(10,2))
-        FROM transactions t
-        JOIN running_balance rb ON t.id = rb.id + 1
-      )
-      UPDATE transactions t
-      SET running_balance = rb.running_balance
-      FROM running_balance rb
-      WHERE t.id = rb.id
-    `);
 
     await client.query('COMMIT');
     client.release();
@@ -182,35 +239,6 @@ app.post('/transaction', async (req, res) => {
       'INSERT INTO transactions (date, description, amount) VALUES ($1, $2, $3)',
       [date, description, finalAmount]
     );
-
-    // Recalculate running balances
-    await pool.query(`
-      WITH RECURSIVE running_balance AS (
-        SELECT 
-          id,
-          date,
-          description,
-          amount,
-          CAST(amount AS numeric(10,2)) as running_balance
-        FROM transactions
-        WHERE id = (SELECT MIN(id) FROM transactions)
-        
-        UNION ALL
-        
-        SELECT 
-          t.id,
-          t.date,
-          t.description,
-          t.amount,
-          CAST(t.amount + rb.running_balance AS numeric(10,2))
-        FROM transactions t
-        JOIN running_balance rb ON t.id = rb.id + 1
-      )
-      UPDATE transactions t
-      SET running_balance = rb.running_balance
-      FROM running_balance rb
-      WHERE t.id = rb.id
-    `);
 
     res.redirect('/');
   } catch (err) {
